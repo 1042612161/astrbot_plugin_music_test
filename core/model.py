@@ -58,6 +58,14 @@ class Song:
         return "\n".join(lines)
 
 
+@dataclass(slots=True)
+class SongSendResult:
+    """Result returned by the shared song sending pipeline."""
+
+    success: bool
+    mode: str | None = None
+    message: str = ""
+
 
 @dataclass(slots=True)
 class Platform:

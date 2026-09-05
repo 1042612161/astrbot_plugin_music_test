@@ -2,7 +2,6 @@ import asyncio
 import base64
 import json
 import random
-import uuid
 from io import BytesIO
 from typing import Any
 
@@ -38,8 +37,9 @@ from astrbot.core.star.context import Context
 from .config import PluginConfig
 from .cz_card import CZCard
 from .downloader import Downloader
-from .model import Song
+from .model import Song, SongSendResult
 from .platform import BaseMusicPlayer, TXQQMusic
+from .selection import MusicSelectionManager, PendingMusicSelection
 from .song_renderer import CardRenderer, PLACEHOLDER_COVER_URL
 
 
@@ -57,13 +57,13 @@ class MusicSender:
         self.song_renderer = song_renderer
         self.cz_card = CZCard(config)
         self._selection_message_ids: dict[str, str | int] = {}
-        self._selection_contexts: dict[str, dict[str, Any]] = {}
-        self._selection_context_ids: dict[str, str] = {}
+        self.selection_manager = MusicSelectionManager(self._on_selection_expired)
         self._interaction_clients: set[int] = set()
         self.interaction_created: bool = False
 
     async def close(self) -> None:
         """Release resources owned by the sender."""
+        await self.selection_manager.close()
         await self.cz_card.close()
         self.song_renderer.clear_cache()
 
@@ -148,16 +148,69 @@ class MusicSender:
     def _make_selection_key(event: AstrMessageEvent) -> str:
         return f"{event.unified_msg_origin}:{event.get_sender_id()}"
 
+    async def _on_selection_expired(self, context: PendingMusicSelection) -> None:
+        try:
+            await context.event.send(context.event.plain_result("点歌超时！"))
+        except Exception as exc:
+            logger.warning(f"发送点歌超时提示失败: {exc}")
+
+    def create_selection_context(
+        self,
+        event: AstrMessageEvent,
+        songs: list[Song],
+        player: BaseMusicPlayer,
+        *,
+        notify_on_timeout: bool = False,
+        start_timeout: bool = True,
+    ) -> PendingMusicSelection:
+        return self.selection_manager.create(
+            selection_key=self._make_selection_key(event),
+            event=event,
+            player=player,
+            songs=songs,
+            timeout=self.cfg.timeout,
+            notify_on_timeout=notify_on_timeout,
+            start_timeout=start_timeout,
+        )
+
+    def claim_selection(
+        self,
+        event: AstrMessageEvent,
+        index: int,
+        selection_id: str | None = None,
+    ) -> tuple[str, PendingMusicSelection | None]:
+        if selection_id:
+            status, context = self.selection_manager.lookup_by_id(selection_id)
+            if status != "ok" or context is None:
+                key_status, _ = self.selection_manager.lookup_by_key(
+                    self._make_selection_key(event)
+                )
+                if key_status == "expired":
+                    return "expired", None
+                return status, None
+            if context.selection_key != self._make_selection_key(event):
+                return "not_found", None
+            return self.selection_manager.claim_by_id(selection_id, index)
+        return self.selection_manager.claim_by_key(
+            self._make_selection_key(event), index
+        )
+
+    def set_selection_display_mode(self, selection_id: str, mode: str) -> None:
+        status, context = self.selection_manager.lookup_by_id(selection_id)
+        if status == "ok" and context is not None:
+            context.display_mode = mode
+            self.selection_manager.start_timeout(selection_id, self.cfg.timeout)
+
     def clear_selection_context(self, event: AstrMessageEvent) -> None:
         """Remove the active selection context for an event.
 
         Args:
             event: The event whose song selection has finished.
         """
-        selection_key = self._make_selection_key(event)
-        selection_id = self._selection_context_ids.pop(selection_key, None)
-        if selection_id:
-            self._selection_contexts.pop(selection_id, None)
+        self.selection_manager.clear_by_key(self._make_selection_key(event))
+
+    def clear_selection_by_id(self, selection_id: str) -> None:
+        self.selection_manager.clear_by_id(selection_id)
 
     async def _recall_selection_message(self, event: AstrMessageEvent) -> None:
         key = self._make_selection_key(event)
@@ -192,25 +245,14 @@ class MusicSender:
             index = int(payload.get("index"))  # type: ignore
         except (TypeError, ValueError):
             return True
-        context = self._selection_contexts.get(selection_id)
-        if context is None or context.get("handled"):
+        status, context = self.selection_manager.claim_by_id(selection_id, index)
+        if status != "ok" or context is None:
             return True
-
-        event = context["event"]
-        selection_key = self._make_selection_key(event)
-        if self._selection_context_ids.get(selection_key) != selection_id:
-            return True
-
-        context["handled"] = True
-        songs = context["songs"]
-        if index < 1 or index > len(songs):
-            return True
-        self.clear_selection_context(event)
         asyncio.create_task(
             self.send_song(
-                event,
-                context["player"],
-                songs[index - 1],
+                context.event,
+                context.player,
+                context.songs[index - 1],
             )
         )
         return True
@@ -287,17 +329,9 @@ class MusicSender:
         event: QQOfficialMessageEvent,
         songs: list[Song],
         player: BaseMusicPlayer,
+        selection_id: str,
     ) -> str | None:
         self.set_interaction_create()
-        selection_id = uuid.uuid4().hex
-        selection_context = {
-            "event": event,
-            "songs": songs,
-            "player": player,
-            "handled": False,
-        }
-        self._selection_contexts[selection_id] = selection_context
-        self._selection_context_ids[self._make_selection_key(event)] = selection_id
 
         buttons = []
         for index, song in enumerate(songs, 1):
@@ -455,25 +489,48 @@ class MusicSender:
         event: AstrMessageEvent,
         songs: list[Song],
         player: BaseMusicPlayer,
+        *,
+        selection_id: str | None = None,
     ) -> str | None:
         for mode in self.cfg.real_select_modes:
+            created_selection_id: str | None = None
             try:
                 if mode == "button":
                     if not isinstance(event, QQOfficialMessageEvent):
                         continue
-                    await self._send_song_selection_button(event, songs, player)
+                    active_selection_id = selection_id
+                    if active_selection_id is None:
+                        context = self.create_selection_context(
+                            event,
+                            songs,
+                            player,
+                            notify_on_timeout=False,
+                            start_timeout=False,
+                        )
+                        active_selection_id = context.selection_id
+                        created_selection_id = active_selection_id
+                    await self._send_song_selection_button(
+                        event, songs, player, active_selection_id
+                    )
+                    self.set_selection_display_mode(active_selection_id, mode)
                     return mode
                 if mode == "image":
                     await self._send_song_selection_image(
                         event=event, songs=songs, player=player
                     )
+                    if selection_id is not None:
+                        self.set_selection_display_mode(selection_id, mode)
                     return mode
                 if mode == "text":
                     await self._send_song_selection_text(event, songs, player)
+                    if selection_id is not None:
+                        self.set_selection_display_mode(selection_id, mode)
                     return mode
                 if mode != "single":
                     logger.warning(f"Unknown song selection mode: {mode}")
             except Exception as e:
+                if created_selection_id is not None:
+                    self.clear_selection_by_id(created_selection_id)
                 logger.warning(f"Song selection mode '{mode}' failed: {e}")
 
         logger.error("All configured song selection modes failed")
@@ -670,7 +727,7 @@ class MusicSender:
         player: BaseMusicPlayer,
         song: Song,
         modes: list[str] | None = None,
-    ):
+    ) -> SongSendResult:
         logger.debug(
             f"{event.get_sender_name()}（{event.get_sender_id()}）点歌："
             f"{player.platform.display_name} -> {song.name}_{song.artists}"
@@ -680,9 +737,10 @@ class MusicSender:
             song = await player.fetch_extra(song)
         if not song.audio_url:
             await event.send(event.plain_result(f"【{song.name}】音频获取失败"))
-            return
+            return SongSendResult(success=False, message="音频获取失败")
 
         sent = False
+        sent_mode: str | None = None
         target_modes = modes if modes is not None else self.cfg.real_send_modes
 
         for mode in target_modes:
@@ -703,13 +761,14 @@ class MusicSender:
             if ok:
                 logger.debug(f"{mode} 发送成功")
                 sent = True
+                sent_mode = mode
                 break
             else:
                 logger.debug(f"{mode} 发送失败，尝试下一种")
 
         if not sent:
             await event.send(event.plain_result("歌曲发送失败"))
-            return
+            return SongSendResult(success=False, message="所有歌曲发送方式均失败")
 
         self.clear_selection_context(event)
         if self.cfg.recall_select:
@@ -717,3 +776,9 @@ class MusicSender:
 
         if self.cfg.enable_comments:
             await self.send_comment(event, player, song)
+
+        return SongSendResult(
+            success=True,
+            mode=sent_mode,
+            message="歌曲发送成功",
+        )

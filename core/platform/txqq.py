@@ -49,6 +49,7 @@ class TXQQMusic(BaseMusicPlayer):
             "荔枝点歌",
             "蜻蜓点歌",
             "喜马点歌",
+            "喜马拉雅",
             "5sing原创",
             "5sing翻唱",
             "全民K歌",
