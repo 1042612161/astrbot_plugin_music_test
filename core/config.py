@@ -105,7 +105,6 @@ class PluginConfig(ConfigNode):
     proxy: str
     timeout: int
     recall_select: bool
-    clear_cache: bool
     render_font: str
     render_emoji_font: str
     render_other_font: str
