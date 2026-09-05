@@ -112,7 +112,7 @@ class PluginConfig(ConfigNode):
     enc_sec_key: str
     enc_params: str
 
-    _plugin_name: str = "astrbot_plugin_music"
+    _plugin_name: str = "astrbot_plugin_music_test"
 
     def __init__(self, config: AstrBotConfig, context: Context):
         super().__init__(config)
