@@ -102,11 +102,13 @@ class PluginConfig(ConfigNode):
     record_unsupported: list[str]
     file_unsupported: list[str]
     enable_comments: bool
-    enable_lyrics: bool
     proxy: str
     timeout: int
     recall_select: bool
     clear_cache: bool
+    render_font: str
+    render_emoji_font: str
+    render_other_font: str
     enc_sec_key: str
     enc_params: str
 
@@ -116,13 +118,46 @@ class PluginConfig(ConfigNode):
         super().__init__(config)
         self.context = context
         self.plugin_dir = Path(get_astrbot_plugin_path()) / self._plugin_name
-        self.font_path = self.plugin_dir / "fonts" / "simhei.ttf"
+        fonts_dir = self.plugin_dir / "fonts"
+        configured_fonts = (
+            ("primary", self.render_font),
+            ("emoji", self.render_emoji_font),
+            ("other", self.render_other_font),
+        )
+        self.font_role_paths: dict[str, Path] = {}
+        for role, configured in configured_fonts:
+            path = self._font_path(fonts_dir, configured, role)
+            if path is not None:
+                self.font_role_paths[role] = path
+        self.font_path = self.font_role_paths.get("primary")
+        if self.font_path is None:
+            raise FileNotFoundError("主渲染字体未配置或文件不存在")
         self.temp_dir = Path(get_astrbot_temp_path()) / self._plugin_name
         self.songs_dir = self.temp_dir / "songs"
         self.songs_dir.mkdir(parents=True, exist_ok=True)
 
         self._select_modes = [m.split("(", 1)[0].strip() for m in self.select_modes]
         self._send_modes = [m.split("(", 1)[0].strip() for m in self.send_modes]
+
+    @staticmethod
+    def _font_path(
+        fonts_dir: Path,
+        configured: str | None,
+        role: str,
+    ) -> Path | None:
+        value = str(configured or "").strip()
+        if not value:
+            logger.warning(f"{role} 字体未配置，已跳过")
+            return None
+        relative = Path(value)
+        if relative.is_absolute() or ".." in relative.parts:
+            logger.warning(f"{role} 字体必须是 fonts 目录下的相对路径，已跳过")
+            return None
+        path = fonts_dir / relative
+        if not path.is_file():
+            logger.warning(f"{role} 字体文件不存在，已跳过: {relative}")
+            return None
+        return path
 
     @property
     def real_select_modes(self) -> list[str]:

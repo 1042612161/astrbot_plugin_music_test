@@ -66,7 +66,6 @@ class SearcherMusic:
                             "artists": song.get("author", "未知"),
                             "url": song.get("url", "无"),
                             "link": song.get("link", "无"),
-                            "lyrics": song.get("lrc", "无"),
                             "cover_url": song.get("pic", "无"),
                         }
                         for song in result["songs"][:limit]

@@ -33,9 +33,6 @@ class Song:
     path: str | None = None
     """音频文件路径(预留给持久化)"""
 
-    lyrics: str | None = None
-    """歌词"""
-
     comments: list | None = None
     """评论列表"""
 

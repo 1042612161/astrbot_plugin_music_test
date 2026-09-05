@@ -62,18 +62,6 @@ class NetEaseMusicNodeJS(BaseMusicPlayer):
             song.comments = comments
         return song
 
-    async def fetch_lyrics(self, song: Song) -> Song:
-        if song.lyrics:
-            return song
-        result = await self._request(f"{self.cfg.nodejs_base_url}/lyric?id={song.id}")
-        if not isinstance(result, dict) or "lrc" not in result:
-            logger.error(f"返回了意料之外数据：{result}")
-            return song
-        lyric = result["lrc"].get("lyric")
-        if lyric:
-            song.lyrics = lyric
-        return song
-
     async def fetch_extra(self, song: Song) -> Song:
         try:
             result = await self._request(

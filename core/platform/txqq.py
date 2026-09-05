@@ -134,7 +134,6 @@ class TXQQMusic(BaseMusicPlayer):
                     artists=s.get("author"),
                     audio_url=s.get("url") or s.get("link"),
                     cover_url=s.get("pic"),
-                    lyrics=s.get("lrc", ""),
                 )
             )
         return songs[:limit]

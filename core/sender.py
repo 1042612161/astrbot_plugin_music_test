@@ -38,10 +38,9 @@ from astrbot.core.star.context import Context
 from .config import PluginConfig
 from .cz_card import CZCard
 from .downloader import Downloader
-from .lyrics_renderer import LyricsRenderer
 from .model import Song
 from .platform import BaseMusicPlayer, TXQQMusic
-from .song_renderer import CardRenderer
+from .song_renderer import CardRenderer, PLACEHOLDER_COVER_URL
 
 
 class MusicSender:
@@ -49,13 +48,11 @@ class MusicSender:
         self,
         config: PluginConfig,
         context: Context,
-        lyrics_renderer: LyricsRenderer,
         downloader: Downloader,
         song_renderer: CardRenderer,
     ):
         self.cfg = config
         self.context = context
-        self.lyrics_renderer = lyrics_renderer
         self.downloader = downloader
         self.song_renderer = song_renderer
         self.cz_card = CZCard(config)
@@ -68,6 +65,7 @@ class MusicSender:
     async def close(self) -> None:
         """Release resources owned by the sender."""
         await self.cz_card.close()
+        self.song_renderer.clear_cache()
 
     def set_interaction_create(self):
         if self.interaction_created:
@@ -233,6 +231,14 @@ class MusicSender:
         return cover_map
 
     @staticmethod
+    def _close_cover_map(cover_map: dict[str, PILImage.Image]) -> None:
+        for image in cover_map.values():
+            try:
+                image.close()
+            except Exception:
+                pass
+
+    @staticmethod
     async def send_msg(event: AiocqhttpMessageEvent, payloads: dict) -> int | None:
         if event.is_private_chat():
             payloads["user_id"] = event.get_sender_id()
@@ -383,6 +389,8 @@ class MusicSender:
         player: BaseMusicPlayer | None = None,
     ) -> str | int | None:
         song_items = []
+        # The configured image-host placeholder is only downloaded when a
+        # result has no usable cover; the template controls its display size.
         cover_urls: list[str] = []
         for song in songs:
             if player and (not song.cover_url or not song.audio_url):
@@ -390,40 +398,52 @@ class MusicSender:
             song_items.append(song)
             if song.cover_url:
                 cover_urls.append(song.cover_url)
+        if any(not song.cover_url for song in song_items):
+            cover_urls.append(PLACEHOLDER_COVER_URL)
 
         cover_map = await self._build_cover_map(cover_urls)
-        image_bytes = await self.song_renderer.render_song_list_image(
-            song_items, cover_map
-        )
+        try:
+            image_bytes = await self.song_renderer.render_song_list_image(
+                song_items,
+                cover_map,
+                title=f"{player.platform.display_name}点歌候选" if player else "音乐点歌候选",
+                hint=f"回复数字 1～{len(song_items)} 播放对应曲目 · 选择在 {self.cfg.timeout} 秒内有效",
+                source_label=player.platform.display_name if player else None,
+            )
 
-        if isinstance(event, AiocqhttpMessageEvent):
-            payloads = {
-                "message": [
-                    {
-                        "type": "image",
-                        "data": {
-                            "file": f"base64://{base64.b64encode(image_bytes).decode()}",
-                        },
-                    }
-                ]
-            }
-            message_id = await self.send_msg(event, payloads)
-        elif isinstance(event, QQOfficialMessageEvent):
-            platform = getattr(event.bot, "platform", None)
-            if platform is not None:
-                await platform.send_by_session(
-                    event.session,
-                    MessageChain(chain=[Image.fromBytes(image_bytes)]),
-                )
-                message_id = getattr(platform, "_session_last_message_id", {}).get(
-                    event.session_id
-                )
+            if isinstance(event, AiocqhttpMessageEvent):
+                payloads = {
+                    "message": [
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": f"base64://{base64.b64encode(image_bytes).decode()}",
+                            },
+                        }
+                    ]
+                }
+                message_id = await self.send_msg(event, payloads)
+            elif isinstance(event, QQOfficialMessageEvent):
+                platform = getattr(event.bot, "platform", None)
+                if platform is not None:
+                    await platform.send_by_session(
+                        event.session,
+                        MessageChain(chain=[Image.fromBytes(image_bytes)]),
+                    )
+                    message_id = getattr(platform, "_session_last_message_id", {}).get(
+                        event.session_id
+                    )
+                else:
+                    await event.send(MessageChain(chain=[Image.fromBytes(image_bytes)]))
+                    message_id = None
             else:
                 await event.send(MessageChain(chain=[Image.fromBytes(image_bytes)]))
                 message_id = None
-        else:
-            await event.send(MessageChain(chain=[Image.fromBytes(image_bytes)]))
-            message_id = None
+        finally:
+            # Cover PIL objects are per-message resources. Keep the shared
+            # Takumi renderer alive so the next card can reuse its fonts and
+            # layout state; it is released by close() on plugin unload.
+            self._close_cover_map(cover_map)
 
         if message_id is not None:
             key = self._make_selection_key(event)
@@ -549,6 +569,8 @@ class MusicSender:
         except Exception as e:
             logger.error(f"Local voice send failed: {e}")
             return False
+        finally:
+            self.downloader.remove_song_file(file_path)
 
     async def _send_file_link(
         self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
@@ -583,6 +605,8 @@ class MusicSender:
         except Exception as e:
             logger.error(f"Local file send failed: {e}")
             return False
+        finally:
+            self.downloader.remove_song_file(file_path)
 
     async def _send_text(
         self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
@@ -611,25 +635,6 @@ class MusicSender:
             await event.send(event.plain_result(content))
             return True
         except Exception:
-            return False
-
-    async def send_lyrics(
-        self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
-    ) -> bool:
-        """发歌词"""
-        if not song.lyrics:
-            await player.fetch_lyrics(song)
-        if song.lyrics:
-            await player.resolve_lyrics(song)
-        if not song.lyrics:
-            logger.error(f"【{song.name}】歌词获取失败")
-            return False
-        try:
-            image = self.lyrics_renderer.draw_lyrics(song.lyrics)
-            await event.send(MessageChain(chain=[Image.fromBytes(image)]))
-            return True
-        except Exception as e:
-            logger.error(f"【{song.name}】歌词渲染/发送失败: {e}")
             return False
 
     def _get_sender(self, mode: str):
@@ -712,6 +717,3 @@ class MusicSender:
 
         if self.cfg.enable_comments:
             await self.send_comment(event, player, song)
-
-        if self.cfg.enable_lyrics:
-            await self.send_lyrics(event, player, song)

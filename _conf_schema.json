@@ -112,12 +112,6 @@
         "type": "bool",
         "default": true
     },
-    "enable_lyrics": {
-        "description": "是否启用歌词",
-        "hint": "开启后在发送歌曲后附加一张歌曲图片",
-        "type": "bool",
-        "default": false
-    },
     "proxy": {
         "description": "代理地址",
         "hint": "如 http://127.0.0.1:7890，留空则直连。作用于网络请求时",
@@ -134,6 +128,24 @@
             "step": 10
         },
         "default": 30
+    },
+    "render_font": {
+        "description": "主渲染字体",
+        "hint": "用于渲染的主字体，默认使用 LXGWWenKai-Regular.ttf。可选用 douyin_sans.otf，自定义请填写 fonts 相对路径下的字体文件名",
+        "type": "string",
+        "default": "LXGWWenKai-Regular.ttf"
+    },
+    "render_emoji_font": {
+        "description": "Emoji字体",
+        "hint": "用于渲染 Emoji 的字体，默认使用 NotoColorEmoji.ttf。自定义请填写 fonts 相对路径下的字体文件名",
+        "type": "string",
+        "default": "NotoColorEmoji.ttf"
+    },
+    "render_other_font": {
+        "description": "其他字体",
+        "hint": "用于渲染主字体中没有的符号与数学花体字符，默认使用 NotoSansMath-Regular.ttf。自定义请填写 fonts 相对路径下的字体文件名",
+        "type": "string",
+        "default": "NotoSansMath-Regular.ttf"
     },
     "recall_select": {
         "description": "撤回选歌消息",

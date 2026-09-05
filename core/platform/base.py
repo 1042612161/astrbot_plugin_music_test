@@ -74,8 +74,6 @@ class BaseMusicPlayer(ABC):
                 song.audio_url = data.get("url")
             if not song.cover_url:
                 song.cover_url = data.get("pic")
-            if not song.lyrics:
-                song.lyrics = data.get("lrc")
         return song
 
     async def fetch_comments(self, song: Song) -> Song:
@@ -102,43 +100,6 @@ class BaseMusicPlayer(ABC):
 
         if comments:
             song.comments = comments
-
-        return song
-
-    async def fetch_lyrics(self, song: Song):
-        """
-        默认获取歌词的实现
-        """
-        if song.lyrics:
-            return song
-        url = f"https://api.qijieya.cn/meting/?server=netease&type=lrc&id={song.id}"
-        try:
-            result = await self._request(url)
-            lyrics = result.get("lyric") if isinstance(result, dict) else str(result)
-            song.lyrics = lyrics
-            return song
-        except Exception as e:
-            logger.warning(f"{self.__class__.__name__} fetch_lyrics 失败: {e}")
-            return song
-
-    async def resolve_lyrics(self, song: Song) -> Song:
-        """将歌词 URL 解析为歌词正文。"""
-        lyrics = song.lyrics.strip() if isinstance(song.lyrics, str) else ""
-        if not lyrics.startswith(("http://", "https://")):
-            return song
-
-        try:
-            async with self.session.get(lyrics, headers=self.HEADERS) as resp:
-                if resp.status != 200:
-                    logger.warning(f"歌词 URL 请求返回 {resp.status}: {lyrics}")
-                    return song
-
-                content = (await resp.text()).strip("\ufeff").strip()
-                logger.debug(f"已成功解析歌词URL: {lyrics}")
-                if content:
-                    song.lyrics = content
-        except Exception as e:
-            logger.warning(f"{self.__class__.__name__} resolve_lyrics 失败: {e}")
 
         return song
 

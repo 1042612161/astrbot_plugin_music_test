@@ -11,7 +11,6 @@ from astrbot.core.utils.session_waiter import (
 
 from .core.config import PluginConfig
 from .core.downloader import Downloader
-from .core.lyrics_renderer import LyricsRenderer
 from .core.platform import BaseMusicPlayer
 from .core.sender import MusicSender
 from .core.song_renderer import CardRenderer
@@ -23,13 +22,11 @@ class MusicPlugin(Star):
         super().__init__(context)
         self.context = context
         self.cfg = PluginConfig(config, context)
-        self.lyrics_renderer = LyricsRenderer(self.cfg)
         self.song_renderer = CardRenderer(self.cfg)
         self.downloader = Downloader(self.cfg)
         self.sender = MusicSender(
             self.cfg,
             self.context,
-            self.lyrics_renderer,
             self.downloader,
             self.song_renderer,
         )
@@ -181,36 +178,6 @@ class MusicPlugin(Star):
             logger.error("点歌发生错误" + str(e))
 
         event.stop_event()
-
-    @filter.command("查歌词", alias={"查看歌词"})
-    async def query_lyrics(self, event: AstrMessageEvent, song_name: str):
-        """查歌词 <搜索词>"""
-        player = self.get_player(default=True)
-        if not player:
-            yield event.plain_result("无可用播放器")
-            return
-        songs = await player.fetch_songs(keyword=song_name, limit=1)
-        if not songs:
-            yield event.plain_result("没找到相关歌曲")
-            return
-        await self.sender.send_lyrics(event, player, songs[0])
-
-    @filter.llm_tool()
-    async def query_lyrics_by_name(self, event: AstrMessageEvent, song_name: str):
-        """当用户想查看歌词时，根据歌名（可含歌手）搜索并发送歌词图片。
-
-        Args:
-            song_name(string): 歌曲名称或包含歌手的关键词
-        """
-        player = self.get_player(default=True)
-        if not player:
-            return "无可用播放器"
-        songs = await player.fetch_songs(keyword=song_name, limit=1)
-        if not songs:
-            return "没找到相关歌曲"
-        sent = await self.sender.send_lyrics(event, player, songs[0])
-        if not sent:
-            return "歌词获取或发送失败"
 
     @filter.llm_tool()
     async def play_song_by_name(
