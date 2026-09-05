@@ -67,26 +67,13 @@
     },
     "send_modes": {
         "description": "发送模式",
-        "hint": "此配置决定发送歌曲方式的优先级, 排在前面的模式优先，发送失败时自动尝试下一种模式。 注意: 卡片模式仅 aiocqhttp 平台可用, 链接模式发送较快，本地模式会先下载再发送，文本模式将以链接形式发送",
-        "type": "list",
+        "hint": "选择一种发送歌曲的方式。语音链接会直接把播放地址交给平台，文件链接会以文件附件发送；发送失败后不会自动切换另一种方式",
+        "type": "string",
         "options": [
-            "card(卡片模式)",
-            "cz_card(CZ卡片)",
             "record_link(语音链接)",
-            "record_local(本地语音)",
-            "file_link(文件链接)",
-            "file_local(本地文件)",
-            "text(文本模式)"
+            "file_link(文件链接)"
         ],
-        "default": [
-            "card(卡片模式)",
-            "cz_card(CZ卡片)",
-            "record_local(本地语音)",
-            "record_link(语音链接)",
-            "file_local(本地文件)",
-            "file_link(文件链接)",
-            "text(文本模式)"
-        ]
+        "default": "record_link(语音链接)"
     },
     "cz_ckey": {
         "description": "CZ API ckey",

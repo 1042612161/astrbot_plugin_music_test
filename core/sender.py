@@ -35,10 +35,9 @@ from astrbot.core.platform.sources.qqofficial.qqofficial_platform_adapter import
 from astrbot.core.star.context import Context
 
 from .config import PluginConfig
-from .cz_card import CZCard
-from .downloader import Downloader
+from .downloader import MAX_AUDIO_LINK_BYTES, Downloader
 from .model import Song, SongSendResult
-from .platform import BaseMusicPlayer, TXQQMusic
+from .platform import BaseMusicPlayer
 from .selection import MusicSelectionManager, PendingMusicSelection
 from .song_renderer import CardRenderer, PLACEHOLDER_COVER_URL
 
@@ -55,7 +54,6 @@ class MusicSender:
         self.context = context
         self.downloader = downloader
         self.song_renderer = song_renderer
-        self.cz_card = CZCard(config)
         self._selection_message_ids: dict[str, str | int] = {}
         self.selection_manager = MusicSelectionManager(self._on_selection_expired)
         self._interaction_clients: set[int] = set()
@@ -64,7 +62,6 @@ class MusicSender:
     async def close(self) -> None:
         """Release resources owned by the sender."""
         await self.selection_manager.close()
-        await self.cz_card.close()
         self.song_renderer.clear_cache()
 
     def set_interaction_create(self):
@@ -536,98 +533,41 @@ class MusicSender:
         logger.error("All configured song selection modes failed")
         return None
 
-    async def _send_card(
-        self, event: AiocqhttpMessageEvent, player: BaseMusicPlayer, song: Song
-    ) -> bool:
-        """发卡片"""
-        if isinstance(player, TXQQMusic):
-            if not song.audio_url or not song.cover_url:
-                song = await player.fetch_extra(song)
-
-            payloads: dict = {
-                "message": [
-                    {
-                        "type": "music",
-                        "data": {
-                            "type": "custom",
-                            "url": song.audio_url or "",
-                            "audio": song.audio_url or "",
-                            "title": song.name or "",
-                            "image": song.cover_url or "",
-                            "singer": song.artists or "",
-                        },
-                    }
-                ]
-            }
-        else:
-            payloads = {
-                "message": [
-                    {
-                        "type": "music",
-                        "data": {
-                            "type": "163",
-                            "id": song.id,
-                        },
-                    }
-                ]
-            }
-        try:
-            await self.send_msg(event, payloads)
-            return True
-        except Exception as e:
-            logger.error(e)
-            await event.send(event.plain_result(str(e)))
-            return False
-
-    async def _send_cz_card(
-        self, event: AiocqhttpMessageEvent, player: BaseMusicPlayer, song: Song
-    ) -> bool:
-        """使用 CZ 音乐签名发卡片"""
-        ark = await self.cz_card.fetch(player, song)
-        if not ark:
-            return False
-        data = json.dumps(ark, ensure_ascii=False)
-        payloads = {"message": [{"type": "json", "data": {"data": data}}]}
-        try:
-            await self.send_msg(event, payloads)
-            return True
-        except Exception as exc:
-            logger.warning(f"CZ 音乐签名卡片发送失败: {type(exc).__name__}")
-            return False
-
     async def _send_record_link(
         self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
     ) -> bool:
         if not song.audio_url:
             return False
         try:
+            # aiocqhttp 的通用 Record 组件会把 URL 下载后转换成 WAV，再
+            # Base64 放入 WebSocket。对 OneBot/NapCat 直接发送 URL 型 record，
+            # 保留源站压缩格式，避免长歌曲膨胀到 50 MiB 的载荷上限。
+            if isinstance(event, AiocqhttpMessageEvent):
+                if not await self.downloader.audio_link_within_limit(song.audio_url):
+                    logger.warning(
+                        f"音频链接超过 {MAX_AUDIO_LINK_BYTES // (1024 * 1024)} MiB 限制，拒绝发送: {song.name}"
+                    )
+                    return False
+                await self.send_msg(
+                    event,
+                    {
+                        "message": [
+                            {
+                                "type": "record",
+                                "data": {"file": song.audio_url},
+                            }
+                        ]
+                    },
+                )
+                return True
+
+            # 其他平台仍使用其原生 Record 组件；是否需要转码由平台适配器决定。
             seg = Record.fromURL(song.audio_url)
             await event.send(event.chain_result([seg]))
             return True
         except Exception as e:
             logger.error(f"Record link send failed: {e}")
             return False
-
-    async def _send_record_local(
-        self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
-    ) -> bool:
-        if not song.audio_url:
-            return False
-
-        file_path = await self.downloader.download_song(song.audio_url)
-        if not file_path:
-            logger.error(f"【{song.name}】下载失败")
-            return False
-
-        try:
-            seg = Record.fromFileSystem(str(file_path.resolve()))
-            await event.send(event.chain_result([seg]))
-            return True
-        except Exception as e:
-            logger.error(f"Local voice send failed: {e}")
-            return False
-        finally:
-            self.downloader.remove_song_file(file_path)
 
     async def _send_file_link(
         self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
@@ -641,41 +581,6 @@ class MusicSender:
             return True
         except Exception as e_url:
             logger.error(f"File link send failed: {e_url}")
-            return False
-
-    async def _send_file_local(
-        self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
-    ) -> bool:
-        if not song.audio_url:
-            return False
-
-        file_path = await self.downloader.download_song(song.audio_url)
-        if not file_path:
-            logger.error(f"【{song.name}】下载失败")
-            return False
-
-        try:
-            file_name = f"{song.name}_{song.artists}{file_path.suffix}"
-            seg = File(name=file_name, file=str(file_path.resolve()))
-            await event.send(event.chain_result([seg]))
-            return True
-        except Exception as e:
-            logger.error(f"Local file send failed: {e}")
-            return False
-        finally:
-            self.downloader.remove_song_file(file_path)
-
-    async def _send_text(
-        self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
-    ) -> bool:
-        """发文本"""
-        if not song.audio_url:
-            return False
-        try:
-            await event.send(event.plain_result(song.audio_url))
-            return True
-        except Exception as e:
-            logger.error(f"文本模式发送歌曲失败: {e}")
             return False
 
     async def send_comment(
@@ -696,27 +601,16 @@ class MusicSender:
 
     def _get_sender(self, mode: str):
         return {
-            "card": self._send_card,
-            "cz_card": self._send_cz_card,
             "record_link": self._send_record_link,
-            "record_local": self._send_record_local,
             "file_link": self._send_file_link,
-            "file_local": self._send_file_local,
-            "text": self._send_text,
         }.get(mode)
 
     def _is_mode_supported(self, mode: str, event: AstrMessageEvent) -> bool:
         platform = event.get_platform_name()
         match mode:
-            case "text":
-                return True
-            case "card":
-                return platform == "aiocqhttp"
-            case "cz_card":
-                return platform == "aiocqhttp"
-            case "record_link" | "record_local":
+            case "record_link":
                 return platform not in self.cfg.record_unsupported
-            case "file_link" | "file_local":
+            case "file_link":
                 return platform not in self.cfg.file_unsupported
             case _:
                 return False
@@ -739,36 +633,32 @@ class MusicSender:
             await event.send(event.plain_result(f"【{song.name}】音频获取失败"))
             return SongSendResult(success=False, message="音频获取失败")
 
-        sent = False
-        sent_mode: str | None = None
-        target_modes = modes if modes is not None else self.cfg.real_send_modes
+        # 配置为单选；保留 modes 参数供旧命令格式使用，但只消费第一个值，
+        # 且不再在发送失败时自动尝试其他方式。
+        mode = (modes[0] if modes else self.cfg.real_send_mode).strip()
+        if mode not in {"record_link", "file_link"}:
+            logger.warning(f"不支持的歌曲发送模式: {mode}")
+            await event.send(event.plain_result("歌曲发送失败：发送模式无效"))
+            return SongSendResult(success=False, message="发送模式无效")
+        if not self._is_mode_supported(mode, event):
+            logger.warning(f"当前平台不支持歌曲发送模式: {mode}")
+            await event.send(event.plain_result("歌曲发送失败：当前平台不支持该发送方式"))
+            return SongSendResult(success=False, message="当前平台不支持该发送方式")
 
-        for mode in target_modes:
-            if not self._is_mode_supported(mode, event):
-                logger.debug(f"{mode} 不支持，跳过")
-                continue
+        sender = self._get_sender(mode)
+        if sender is None:
+            await event.send(event.plain_result("歌曲发送失败：发送模式无效"))
+            return SongSendResult(success=False, message="发送模式无效")
 
-            sender = self._get_sender(mode)
-            if not sender:
-                continue
-
-            try:
-                ok = await sender(event, player, song)
-            except Exception as e:
-                logger.error(f"{mode} 发送异常: {e}")
-                ok = False
-
-            if ok:
-                logger.debug(f"{mode} 发送成功")
-                sent = True
-                sent_mode = mode
-                break
-            else:
-                logger.debug(f"{mode} 发送失败，尝试下一种")
+        try:
+            sent = await sender(event, player, song)
+        except Exception as exc:
+            logger.error(f"{mode} 发送异常: {exc}")
+            sent = False
 
         if not sent:
             await event.send(event.plain_result("歌曲发送失败"))
-            return SongSendResult(success=False, message="所有歌曲发送方式均失败")
+            return SongSendResult(success=False, mode=mode, message="歌曲发送失败")
 
         self.clear_selection_context(event)
         if self.cfg.recall_select:
@@ -779,6 +669,6 @@ class MusicSender:
 
         return SongSendResult(
             success=True,
-            mode=sent_mode,
+            mode=mode,
             message="歌曲发送成功",
         )

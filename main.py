@@ -5,6 +5,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
+from astrbot.core.platform.sources.wecom_ai_bot.WXBizJsonMsgCrypt import throw_exception
 from astrbot.core.utils.session_waiter import (
     SessionController,
     session_waiter,
@@ -17,6 +18,9 @@ from .core.platform import BaseMusicPlayer
 from .core.sender import MusicSender
 from .core.song_renderer import CardRenderer
 from .core.utils import parse_user_input
+
+
+_LLM_TERMINAL_ERROR = "啧，终端刚刚抽风了，关键时候掉链子。"
 
 
 class MusicPlugin(Star):
@@ -204,15 +208,7 @@ class MusicPlugin(Star):
             result = await self.sender.send_song(event, player, song)
         except Exception as exc:
             logger.error(f"LLM 点歌发送异常: {exc}")
-            return self._llm_tool_result(
-                "send_failed",
-                "歌曲发送过程中发生异常",
-                song={
-                    "name": song.name,
-                    "artists": song.artists or song.author,
-                    "platform": player.platform.display_name,
-                },
-            )
+            return self._llm_tool_result("error", _LLM_TERMINAL_ERROR)
         return self._llm_tool_result(
             "played" if result.success else "send_failed",
             result.message,
@@ -226,74 +222,59 @@ class MusicPlugin(Star):
 
     @filter.llm_tool(name="search_and_play_music")
     async def search_and_play_music(
-        self, event: AstrMessageEvent, query: str = "", platform: str = ""
+        self, event: AstrMessageEvent, query: str = ""
     ) -> str:
         """用户想听某首歌或某位歌手的歌时，搜索歌曲；单个结果直接播放，多个结果发送候选列表。不要用它确认候选序号。
 
         Args:
-            query(string): 歌曲名称、歌手名称，或包含歌曲和歌手的搜索关键词
-            platform(string): 可选点歌平台，留空使用默认播放器。支持：网易点歌、网易nj、QQ点歌、酷狗点歌、酷我点歌、百度点歌、一听点歌、咪咕点歌、荔枝点歌、蜻蜓点歌、喜马拉雅、5sing原创、5sing翻唱、全民K歌。
+            query(string): 仅从用户原话提取的歌曲名称或歌手名称。优先歌曲名称，其次歌手名称；不要添加“游戏原声带”等用户未提及的内容。例如“我想听鸣潮的歌”传入“鸣潮”，“来一首小小奇迹”传入“小小奇迹”。
         """
-        query = str(query or "").strip()
-        platform = str(platform or "").strip()
-        if not query:
-            return self._llm_tool_result("invalid_query", "没有提供歌曲或歌手关键词")
-        player = (
-            self.get_player(name=platform)
-            if platform
-            else self.get_player(default=True)
-        )
-        if not player:
-            message = f"无可用播放器：{platform}" if platform else "无可用播放器"
-            return self._llm_tool_result("player_not_found", message)
-
-        logger.debug(f"LLM 正在通过{player.platform.display_name}搜索歌曲：{query}")
         try:
+            query = str(query or "").strip()
+
+            # LLM 工具不再接收 platform，由插件配置决定唯一的默认播放器。
+            player = self.get_player(default=True)
+
+            logger.debug(f"LLM 正在通过{player.platform.display_name}搜索歌曲：{query}")
             songs = await player.fetch_songs(
                 keyword=query,
                 limit=self.cfg.real_song_limit,
-                extra=platform or self.cfg.default_player_name,
+                extra=self.cfg.default_player_name,
+            )
+
+            if len(songs) == 1:
+                return await self._send_song_for_llm(event, player, songs[0])
+
+            selection = self.sender.create_selection_context(
+                event,
+                songs,
+                player,
+                notify_on_timeout=True,
+                start_timeout=False,
+            )
+            selection_mode = await self.sender.send_song_selection(
+                event=event,
+                songs=songs,
+                player=player,
+                selection_id=selection.selection_id,
+            )
+            if selection_mode is None:
+                self.sender.clear_selection_by_id(selection.selection_id)
+                return self._llm_tool_result(
+                    "selection_send_failed", _LLM_TERMINAL_ERROR
+                )
+
+            return self._llm_tool_result(
+                "awaiting_selection",
+                "终端找到了好多，你想听哪个呀",
+                selection_id=selection.selection_id,
+                count=len(songs),
+                expires_in=self.cfg.timeout,
+                display_mode=selection_mode,
             )
         except Exception as exc:
-            logger.error(f"LLM 点歌搜索异常: {exc}")
-            return self._llm_tool_result(
-                "search_failed", "音乐平台搜索请求失败，请稍后重试"
-            )
-        if not songs:
-            return self._llm_tool_result(
-                "not_found", f"没有找到与“{query}”相关的歌曲"
-            )
-
-        if len(songs) == 1:
-            return await self._send_song_for_llm(event, player, songs[0])
-
-        selection = self.sender.create_selection_context(
-            event,
-            songs,
-            player,
-            notify_on_timeout=True,
-            start_timeout=False,
-        )
-        selection_mode = await self.sender.send_song_selection(
-            event=event,
-            songs=songs,
-            player=player,
-            selection_id=selection.selection_id,
-        )
-        if selection_mode is None:
-            self.sender.clear_selection_by_id(selection.selection_id)
-            return self._llm_tool_result(
-                "selection_send_failed", "搜索成功，但候选歌曲列表发送失败"
-            )
-
-        return self._llm_tool_result(
-            "awaiting_selection",
-            f"已发送 {len(songs)} 首候选歌曲，请让用户在 {self.cfg.timeout} 秒内回复序号",
-            selection_id=selection.selection_id,
-            count=len(songs),
-            expires_in=self.cfg.timeout,
-            display_mode=selection_mode,
-        )
+            logger.error(f"LLM 搜索/播放流程异常: {exc}")
+            return self._llm_tool_result("search_failed", _LLM_TERMINAL_ERROR)
 
     @filter.llm_tool(name="confirm_music_selection")
     async def confirm_music_selection(
@@ -305,42 +286,24 @@ class MusicPlugin(Star):
         """用户已经收到音乐候选列表并回复序号时，确认该序号并播放对应歌曲。没有候选列表时不要调用。
 
         Args:
-            index(number): 用户确认的候选歌曲序号，从1开始
+            index(number): 用户确认的候选歌曲序号，从1开始。如果用户传入的不是数字，需要根据用户的输入解析成整数数字。例如“第一首”传入1，“最后一首”传入selection.songs长度的最大值。
             selection_id(string): 可选候选列表标识；通常留空并使用当前会话最新列表
         """
         try:
             parsed_index = int(index)
-        except (TypeError, ValueError):
-            return self._llm_tool_result("invalid_index", "歌曲序号必须是整数")
-        if isinstance(index, float) and not index.is_integer():
-            return self._llm_tool_result("invalid_index", "歌曲序号必须是整数")
-        if parsed_index < 1:
-            return self._llm_tool_result("invalid_index", "歌曲序号必须从 1 开始")
 
-        status, selection = self.sender.claim_selection(
-            event,
-            parsed_index,
-            str(selection_id or "").strip() or None,
-        )
-        if status == "expired":
-            return self._llm_tool_result(
-                "expired", "上一次点歌候选列表已经超时，请重新搜索"
-            )
-        if status == "not_found" or selection is None:
-            return self._llm_tool_result(
-                "no_pending_selection", "当前会话没有等待确认的歌曲列表"
-            )
-        if status == "invalid_index":
-            return self._llm_tool_result(
-                "invalid_index",
-                f"歌曲序号应为 1～{len(selection.songs)}",
-                min=1,
-                max=len(selection.songs),
+            status, selection = self.sender.claim_selection(
+                event,
+                parsed_index,
+                str(selection_id or "").strip() or None,
             )
 
-        song = selection.songs[parsed_index - 1]
-        return await self._send_song_for_llm(
-            event,
-            selection.player,
-            song,
-        )
+            song = selection.songs[parsed_index - 1]
+            return await self._send_song_for_llm(
+                event,
+                selection.player,
+                song,
+            )
+        except Exception as exc:
+            logger.error(f"LLM 确认/播放流程异常: {exc}")
+            return self._llm_tool_result("error", _LLM_TERMINAL_ERROR)

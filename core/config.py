@@ -97,7 +97,7 @@ class PluginConfig(ConfigNode):
     song_limit: int
     select_modes: list[str]
     cards_per_row: int
-    send_modes: list[str]
+    send_modes: str
     cz_ckey: str
     record_unsupported: list[str]
     file_unsupported: list[str]
@@ -136,7 +136,26 @@ class PluginConfig(ConfigNode):
         self.songs_dir.mkdir(parents=True, exist_ok=True)
 
         self._select_modes = [m.split("(", 1)[0].strip() for m in self.select_modes]
-        self._send_modes = [m.split("(", 1)[0].strip() for m in self.send_modes]
+
+        # 发送方式改为单选。兼容旧版曾保存的列表配置，优先取其中第一个
+        # 仍支持的模式，且只允许两种不会触发 AstrBot WAV/Base64 转换链路的方式。
+        raw_send_mode: Any = self.send_modes
+        legacy_modes = raw_send_mode if isinstance(raw_send_mode, list) else [raw_send_mode]
+        send_mode = ""
+        for candidate in legacy_modes:
+            parsed = str(candidate or "").split("(", 1)[0].strip()
+            if parsed in {"record_link", "file_link"}:
+                send_mode = parsed
+                break
+        if not send_mode and legacy_modes:
+            send_mode = str(legacy_modes[0] or "").split("(", 1)[0].strip()
+        if send_mode not in {"record_link", "file_link"}:
+            if send_mode:
+                logger.warning(
+                    f"发送模式 {send_mode} 不受支持，已改用默认语音链接模式"
+                )
+            send_mode = "record_link"
+        self._send_mode = send_mode
 
     @staticmethod
     def _font_path(
@@ -168,7 +187,12 @@ class PluginConfig(ConfigNode):
 
     @property
     def real_send_modes(self) -> list[str]:
-        return self._send_modes
+        # 保留列表形式的兼容属性，发送器只会消费其中唯一的一个模式。
+        return [self._send_mode]
+
+    @property
+    def real_send_mode(self) -> str:
+        return self._send_mode
 
     @property
     def real_song_limit(self) -> int:

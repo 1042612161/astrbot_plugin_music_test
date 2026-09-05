@@ -1,5 +1,6 @@
 import uuid
 from pathlib import Path
+from typing import Final
 
 import aiofiles
 import aiohttp
@@ -7,6 +8,9 @@ import aiohttp
 from astrbot.api import logger
 
 from .config import PluginConfig
+
+
+MAX_AUDIO_LINK_BYTES: Final = 15 * 1024 * 1024
 
 
 class Downloader:
@@ -61,6 +65,34 @@ class Downloader:
                 return img_bytes
         except Exception as e:
             logger.error(f"图片下载失败: {e}")
+
+    async def audio_link_within_limit(
+        self,
+        url: str,
+        max_bytes: int = MAX_AUDIO_LINK_BYTES,
+    ) -> bool:
+        """Check a remote audio URL without downloading or re-encoding it.
+
+        Most music APIs provide ``Content-Length``.  When an endpoint omits it
+        or rejects HEAD, the URL is allowed so that a metadata quirk does not
+        prevent sending; NapCat still fetches the original compressed stream.
+        """
+        try:
+            async with self.session.head(
+                url,
+                allow_redirects=True,
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as response:
+                length = response.headers.get("Content-Length")
+                if not length:
+                    return True
+                try:
+                    return int(length) <= max_bytes
+                except ValueError:
+                    return True
+        except Exception as exc:
+            logger.debug(f"检查音频链接大小失败，继续使用原始链接发送: {exc}")
+            return True
 
     async def download_song(self, url: str) -> Path | None:
         """下载歌曲，返回保存路径"""
